@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -20,12 +20,13 @@ import {
   FunctionCall,
   FunctionResponse,
 } from '@google/genai';
-import { ContentGenerator } from './contentGenerator.js';
+import { AuthType, ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
-import { logApiResponse } from '../telemetry/loggers.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
+import { logApiError, logApiResponse } from '../telemetry/loggers.js';
+import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
+import { safeJsonParse } from '../utils/safeJsonParse.js';
 
 // Extended types to support cache_control
 interface ChatCompletionContentPartTextWithCache extends OpenAI.Chat.ChatCompletionContentPartText {
@@ -94,7 +95,7 @@ interface OpenAIResponseFormat {
 }
 
 export class OpenAIContentGenerator implements ContentGenerator {
-  private client: OpenAI;
+  protected client: OpenAI;
   private model: string;
   private config: Config;
   private streamingToolCalls: Map<
@@ -130,14 +131,20 @@ export class OpenAIContentGenerator implements ContentGenerator {
       timeoutConfig.maxRetries = contentGeneratorConfig.maxRetries;
     }
 
+    const version = config.getCliVersion() || 'unknown';
+    const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
+
     // Check if using OpenRouter and add required headers
     const isOpenRouter = baseURL.includes('openrouter.ai');
-    const defaultHeaders = isOpenRouter
-      ? {
-          'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
-          'X-Title': 'Qwen Code',
-        }
-      : undefined;
+    const defaultHeaders = {
+      'User-Agent': userAgent,
+      ...(isOpenRouter
+        ? {
+            'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+            'X-Title': 'Qwen Code',
+          }
+        : {}),
+    };
 
     this.client = new OpenAI({
       apiKey,
@@ -146,6 +153,19 @@ export class OpenAIContentGenerator implements ContentGenerator {
       maxRetries: timeoutConfig.maxRetries,
       defaultHeaders,
     });
+  }
+
+  /**
+   * Hook for subclasses to customize error handling behavior
+   * @param error The error that occurred
+   * @param request The original request
+   * @returns true if error logging should be suppressed, false otherwise
+   */
+  protected shouldSuppressErrorLogging(
+    _error: unknown,
+    _request: GenerateContentParameters,
+  ): boolean {
+    return false; // Default behavior: never suppress error logging
   }
 
   /**
@@ -181,8 +201,49 @@ export class OpenAIContentGenerator implements ContentGenerator {
     );
   }
 
+  /**
+   * Determine if metadata should be included in the request.
+   * Only include the `metadata` field if the provider is QWEN_OAUTH
+   * or the baseUrl is 'https://dashscope.aliyuncs.com/compatible-mode/v1'.
+   * This is because some models/providers do not support metadata or need extra configuration.
+   *
+   * @returns true if metadata should be included, false otherwise
+   */
+  private shouldIncludeMetadata(): boolean {
+    const authType = this.config.getContentGeneratorConfig?.()?.authType;
+    // baseUrl may be undefined; default to empty string if so
+    const baseUrl = this.client?.baseURL || '';
+
+    return (
+      authType === AuthType.QWEN_OAUTH ||
+      baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    );
+  }
+
+  /**
+   * Build metadata object for OpenAI API requests.
+   *
+   * @param userPromptId The user prompt ID to include in metadata
+   * @returns metadata object if shouldIncludeMetadata() returns true, undefined otherwise
+   */
+  private buildMetadata(
+    userPromptId: string,
+  ): { metadata: { sessionId?: string; promptId: string } } | undefined {
+    if (!this.shouldIncludeMetadata()) {
+      return undefined;
+    }
+
+    return {
+      metadata: {
+        sessionId: this.config.getSessionId?.(),
+        promptId: userPromptId,
+      },
+    };
+  }
+
   async generateContent(
     request: GenerateContentParameters,
+    userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
@@ -200,6 +261,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         model: this.model,
         messages,
         ...samplingParams,
+        ...(this.buildMetadata(userPromptId) || {}),
       };
 
       if (request.config?.tools) {
@@ -217,9 +279,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Log API response event for UI telemetry
       const responseEvent = new ApiResponseEvent(
+        response.responseId || 'unknown',
         this.model,
         durationMs,
-        `openai-${Date.now()}`, // Generate a prompt ID
+        userPromptId,
         this.config.getContentGeneratorConfig()?.authType,
         response.usageMetadata,
       );
@@ -245,41 +308,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
           ? error.message
           : String(error);
 
-      // Estimate token usage even when there's an error
-      // This helps track costs and usage even for failed requests
-      let estimatedUsage;
-      try {
-        const tokenCountResult = await this.countTokens({
-          contents: request.contents,
-          model: this.model,
-        });
-        estimatedUsage = {
-          promptTokenCount: tokenCountResult.totalTokens,
-          candidatesTokenCount: 0, // No completion tokens since request failed
-          totalTokenCount: tokenCountResult.totalTokens,
-        };
-      } catch {
-        // If token counting also fails, provide a minimal estimate
-        const contentStr = JSON.stringify(request.contents);
-        const estimatedTokens = Math.ceil(contentStr.length / 4);
-        estimatedUsage = {
-          promptTokenCount: estimatedTokens,
-          candidatesTokenCount: 0,
-          totalTokenCount: estimatedTokens,
-        };
-      }
-
-      // Log API error event for UI telemetry with estimated usage
-      const errorEvent = new ApiResponseEvent(
+      // Log API error event for UI telemetry
+      const errorEvent = new ApiErrorEvent(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).requestID || 'unknown',
         this.model,
-        durationMs,
-        `openai-${Date.now()}`, // Generate a prompt ID
-        this.config.getContentGeneratorConfig()?.authType,
-        estimatedUsage,
-        undefined,
         errorMessage,
+        durationMs,
+        userPromptId,
+        this.config.getContentGeneratorConfig()?.authType,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).type,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).code,
       );
-      logApiResponse(this.config, errorEvent);
+      logApiError(this.config, errorEvent);
 
       // Log error interaction if enabled
       if (this.config.getContentGeneratorConfig()?.enableOpenAILogging) {
@@ -291,7 +334,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
         );
       }
 
-      console.error('OpenAI API Error:', errorMessage);
+      // Allow subclasses to suppress error logging for specific scenarios
+      if (!this.shouldSuppressErrorLogging(error, request)) {
+        console.error('OpenAI API Error:', errorMessage);
+      }
 
       // Provide helpful timeout-specific error message
       if (isTimeoutError) {
@@ -304,12 +350,13 @@ export class OpenAIContentGenerator implements ContentGenerator {
         );
       }
 
-      throw new Error(`OpenAI API error: ${errorMessage}`);
+      throw error;
     }
   }
 
   async generateContentStream(
     request: GenerateContentParameters,
+    userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
@@ -326,6 +373,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ...samplingParams,
         stream: true,
         stream_options: { include_usage: true },
+        ...(this.buildMetadata(userPromptId) || {}),
       };
 
       if (request.config?.tools) {
@@ -333,8 +381,6 @@ export class OpenAIContentGenerator implements ContentGenerator {
           request.config.tools,
         );
       }
-
-      // console.log('createParams', createParams);
 
       const stream = (await this.client.chat.completions.create(
         createParams,
@@ -363,9 +409,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
           // Log API response event for UI telemetry
           const responseEvent = new ApiResponseEvent(
+            responses[responses.length - 1]?.responseId || 'unknown',
             this.model,
             durationMs,
-            `openai-stream-${Date.now()}`, // Generate a prompt ID
+            userPromptId,
             this.config.getContentGeneratorConfig()?.authType,
             finalUsageMetadata,
           );
@@ -394,40 +441,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
               ? error.message
               : String(error);
 
-          // Estimate token usage even when there's an error in streaming
-          let estimatedUsage;
-          try {
-            const tokenCountResult = await this.countTokens({
-              contents: request.contents,
-              model: this.model,
-            });
-            estimatedUsage = {
-              promptTokenCount: tokenCountResult.totalTokens,
-              candidatesTokenCount: 0, // No completion tokens since request failed
-              totalTokenCount: tokenCountResult.totalTokens,
-            };
-          } catch {
-            // If token counting also fails, provide a minimal estimate
-            const contentStr = JSON.stringify(request.contents);
-            const estimatedTokens = Math.ceil(contentStr.length / 4);
-            estimatedUsage = {
-              promptTokenCount: estimatedTokens,
-              candidatesTokenCount: 0,
-              totalTokenCount: estimatedTokens,
-            };
-          }
-
-          // Log API error event for UI telemetry with estimated usage
-          const errorEvent = new ApiResponseEvent(
+          // Log API error event for UI telemetry
+          const errorEvent = new ApiErrorEvent(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).requestID || 'unknown',
             this.model,
-            durationMs,
-            `openai-stream-${Date.now()}`, // Generate a prompt ID
-            this.config.getContentGeneratorConfig()?.authType,
-            estimatedUsage,
-            undefined,
             errorMessage,
+            durationMs,
+            userPromptId,
+            this.config.getContentGeneratorConfig()?.authType,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).type,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).code,
           );
-          logApiResponse(this.config, errorEvent);
+          logApiError(this.config, errorEvent);
 
           // Log error interaction if enabled
           if (this.config.getContentGeneratorConfig()?.enableOpenAILogging) {
@@ -467,42 +495,26 @@ export class OpenAIContentGenerator implements ContentGenerator {
           ? error.message
           : String(error);
 
-      // Estimate token usage even when there's an error in streaming setup
-      let estimatedUsage;
-      try {
-        const tokenCountResult = await this.countTokens({
-          contents: request.contents,
-          model: this.model,
-        });
-        estimatedUsage = {
-          promptTokenCount: tokenCountResult.totalTokens,
-          candidatesTokenCount: 0, // No completion tokens since request failed
-          totalTokenCount: tokenCountResult.totalTokens,
-        };
-      } catch {
-        // If token counting also fails, provide a minimal estimate
-        const contentStr = JSON.stringify(request.contents);
-        const estimatedTokens = Math.ceil(contentStr.length / 4);
-        estimatedUsage = {
-          promptTokenCount: estimatedTokens,
-          candidatesTokenCount: 0,
-          totalTokenCount: estimatedTokens,
-        };
-      }
-
-      // Log API error event for UI telemetry with estimated usage
-      const errorEvent = new ApiResponseEvent(
+      // Log API error event for UI telemetry
+      const errorEvent = new ApiErrorEvent(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).requestID || 'unknown',
         this.model,
-        durationMs,
-        `openai-stream-${Date.now()}`, // Generate a prompt ID
-        this.config.getContentGeneratorConfig()?.authType,
-        estimatedUsage,
-        undefined,
         errorMessage,
+        durationMs,
+        userPromptId,
+        this.config.getContentGeneratorConfig()?.authType,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).type,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).code,
       );
-      logApiResponse(this.config, errorEvent);
+      logApiError(this.config, errorEvent);
 
-      console.error('OpenAI API Streaming Error:', errorMessage);
+      // Allow subclasses to suppress error logging for specific scenarios
+      if (!this.shouldSuppressErrorLogging(error, request)) {
+        console.error('OpenAI API Streaming Error:', errorMessage);
+      }
 
       // Provide helpful timeout-specific error message for streaming setup
       if (isTimeoutError) {
@@ -515,7 +527,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         );
       }
 
-      throw new Error(`OpenAI API error: ${errorMessage}`);
+      throw error;
     }
   }
 
@@ -567,7 +579,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
     // Add combined text if any
     if (combinedText) {
-      combinedParts.push({ text: combinedText });
+      combinedParts.push({ text: combinedText.trimEnd() });
     }
 
     // Add function calls
@@ -744,6 +756,16 @@ export class OpenAIContentGenerator implements ContentGenerator {
     return convertTypes(converted) as Record<string, unknown> | undefined;
   }
 
+  /**
+   * Converts Gemini tools to OpenAI format for API compatibility.
+   * Handles both Gemini tools (using 'parameters' field) and MCP tools (using 'parametersJsonSchema' field).
+   *
+   * Gemini tools use a custom parameter format that needs conversion to OpenAI JSON Schema format.
+   * MCP tools already use JSON Schema format in the parametersJsonSchema field and can be used directly.
+   *
+   * @param geminiTools - Array of Gemini tools to convert
+   * @returns Promise resolving to array of OpenAI-compatible tools
+   */
   private async convertGeminiToolsToOpenAI(
     geminiTools: ToolListUnion,
   ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
@@ -764,14 +786,31 @@ export class OpenAIContentGenerator implements ContentGenerator {
       if (actualTool.functionDeclarations) {
         for (const func of actualTool.functionDeclarations) {
           if (func.name && func.description) {
+            let parameters: Record<string, unknown> | undefined;
+
+            // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
+            if (func.parametersJsonSchema) {
+              // MCP tool format - use parametersJsonSchema directly
+              if (func.parametersJsonSchema) {
+                // Create a shallow copy to avoid mutating the original object
+                const paramsCopy = {
+                  ...(func.parametersJsonSchema as Record<string, unknown>),
+                };
+                parameters = paramsCopy;
+              }
+            } else if (func.parameters) {
+              // Gemini tool format - convert parameters to OpenAI format
+              parameters = this.convertGeminiParametersToOpenAI(
+                func.parameters as Record<string, unknown>,
+              );
+            }
+
             openAITools.push({
               type: 'function',
               function: {
                 name: func.name,
                 description: func.description,
-                parameters: this.convertGeminiParametersToOpenAI(
-                  (func.parameters || {}) as Record<string, unknown>,
-                ),
+                parameters,
               },
             });
           }
@@ -1208,7 +1247,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
     // Handle text content
     if (choice.message.content) {
-      parts.push({ text: choice.message.content });
+      if (typeof choice.message.content === 'string') {
+        parts.push({ text: choice.message.content.trimEnd() });
+      } else {
+        parts.push({ text: choice.message.content });
+      }
     }
 
     // Handle tool calls
@@ -1217,12 +1260,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         if (toolCall.function) {
           let args: Record<string, unknown> = {};
           if (toolCall.function.arguments) {
-            try {
-              args = JSON.parse(toolCall.function.arguments);
-            } catch (error) {
-              console.error('Failed to parse function arguments:', error);
-              args = {};
-            }
+            args = safeJsonParse(toolCall.function.arguments, {});
           }
 
           parts.push({
@@ -1298,7 +1336,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Handle text content
       if (choice.delta?.content) {
-        parts.push({ text: choice.delta.content });
+        if (typeof choice.delta.content === 'string') {
+          parts.push({ text: choice.delta.content.trimEnd() });
+        } else {
+          parts.push({ text: choice.delta.content });
+        }
       }
 
       // Handle tool calls - only accumulate during streaming, emit when complete
@@ -1334,19 +1376,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
           if (accumulatedCall.name) {
             let args: Record<string, unknown> = {};
             if (accumulatedCall.arguments) {
-              try {
-                args = JSON.parse(accumulatedCall.arguments);
-              } catch (error) {
-                console.error(
-                  'Failed to parse final tool call arguments:',
-                  error,
-                );
-              }
+              args = safeJsonParse(accumulatedCall.arguments, {});
             }
 
             parts.push({
               functionCall: {
-                id: accumulatedCall.id,
+                id:
+                  accumulatedCall.id ||
+                  `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
                 name: accumulatedCall.name,
                 args,
               },
@@ -1886,7 +1923,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         }
       }
 
-      messageContent = textParts.join('');
+      messageContent = textParts.join('').trimEnd();
     }
 
     const choice: OpenAIChoice = {

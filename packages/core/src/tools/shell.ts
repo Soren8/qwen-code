@@ -124,14 +124,19 @@ export class ShellTool extends BaseTool<ShellToolParams, ToolResult> {
     }
     if (params.directory) {
       if (path.isAbsolute(params.directory)) {
-        return 'Directory cannot be absolute. Must be relative to the project root directory.';
+        return 'Directory cannot be absolute. Please refer to workspace directories by their name.';
       }
-      const directory = path.resolve(
-        this.config.getTargetDir(),
-        params.directory,
+      const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
+      const matchingDirs = workspaceDirs.filter(
+        (dir) => path.basename(dir) === params.directory,
       );
-      if (!fs.existsSync(directory)) {
-        return 'Directory must exist.';
+
+      if (matchingDirs.length === 0) {
+        return `Directory '${params.directory}' is not a registered workspace directory.`;
+      }
+
+      if (matchingDirs.length > 1) {
+        return `Directory name '${params.directory}' is ambiguous as it matches multiple workspace directories.`;
       }
     }
     return null;
@@ -200,12 +205,15 @@ export class ShellTool extends BaseTool<ShellToolParams, ToolResult> {
     const tempFilePath = path.join(os.tmpdir(), tempFileName);
 
     try {
+      // Add co-author to git commit commands
+      const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+
       // pgrep is not available on Windows, so we can't get background PIDs
       const commandToExecute = isWindows
-        ? strippedCommand
+        ? processedCommand
         : (() => {
             // wrap command to append subprocess pids (via pgrep) to temporary file
-            let command = strippedCommand.trim();
+            let command = processedCommand.trim();
             if (!command.endsWith('&')) command += ';';
             return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
           })();
@@ -376,5 +384,41 @@ export class ShellTool extends BaseTool<ShellToolParams, ToolResult> {
         fs.unlinkSync(tempFilePath);
       }
     }
+  }
+
+  private addCoAuthorToGitCommit(command: string): string {
+    // Check if co-author feature is enabled
+    const gitCoAuthorSettings = this.config.getGitCoAuthor();
+    if (!gitCoAuthorSettings.enabled) {
+      return command;
+    }
+
+    // Check if this is a git commit command
+    const gitCommitPattern = /^git\s+commit/;
+    if (!gitCommitPattern.test(command.trim())) {
+      return command;
+    }
+
+    // Define the co-author line using configuration
+    const coAuthor = `
+
+Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
+
+    // Handle different git commit patterns
+    // Match -m "message" or -m 'message'
+    const messagePattern = /(-m\s+)(['"])((?:\\.|[^\\])*?)(\2)/;
+    const match = command.match(messagePattern);
+
+    if (match) {
+      const [fullMatch, prefix, quote, existingMessage, closingQuote] = match;
+      const newMessage = existingMessage + coAuthor;
+      const replacement = prefix + quote + newMessage + closingQuote;
+
+      return command.replace(fullMatch, replacement);
+    }
+
+    // If no -m flag found, the command might open an editor
+    // In this case, we can't easily modify it, so return as-is
+    return command;
   }
 }

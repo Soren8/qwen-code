@@ -37,6 +37,7 @@ import * as crypto from 'crypto';
 import * as summarizer from '../utils/summarizer.js';
 import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
+import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
 describe('ShellTool', () => {
   let shellTool: ShellTool;
@@ -53,7 +54,13 @@ describe('ShellTool', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
+      getWorkspaceContext: () => createMockWorkspaceContext('.'),
       getGeminiClient: vi.fn(),
+      getGitCoAuthor: vi.fn().mockReturnValue({
+        enabled: true,
+        name: 'Qwen-Coder',
+        email: 'qwen-coder@alibabacloud.com',
+      }),
     } as unknown as Config;
 
     shellTool = new ShellTool(mockConfig);
@@ -105,7 +112,7 @@ describe('ShellTool', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       expect(
         shellTool.validateToolParams({ command: 'ls', directory: 'rel/path' }),
-      ).toBe('Directory must exist.');
+      ).toBe("Directory 'rel/path' is not a registered workspace directory.");
     });
   });
 
@@ -383,5 +390,190 @@ describe('ShellTool', () => {
       );
       expect(confirmation).toBe(false);
     });
+  });
+
+  describe('addCoAuthorToGitCommit', () => {
+    it('should add co-author to git commit with double quotes', () => {
+      const command = 'git commit -m "Initial commit"';
+      // Use public test method
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Initial commit
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should add co-author to git commit with single quotes', () => {
+      const command = "git commit -m 'Fix bug'";
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m 'Fix bug
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>'`,
+      );
+    });
+
+    it('should handle git commit with additional flags', () => {
+      const command = 'git commit -a -m "Add feature"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -a -m "Add feature
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should not modify non-git commands', () => {
+      const command = 'npm install';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('npm install');
+    });
+
+    it('should not modify git commands without -m flag', () => {
+      const command = 'git commit';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('git commit');
+    });
+
+    it('should handle git commit with escaped quotes in message', () => {
+      const command = 'git commit -m "Fix \\"quoted\\" text"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Fix \\"quoted\\" text
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should not add co-author when disabled in config', () => {
+      // Mock config with disabled co-author
+      (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+        enabled: false,
+        name: 'Qwen-Coder',
+        email: 'qwen-coder@alibabacloud.com',
+      });
+
+      const command = 'git commit -m "Initial commit"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('git commit -m "Initial commit"');
+    });
+
+    it('should use custom name and email from config', () => {
+      // Mock config with custom co-author details
+      (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+        enabled: true,
+        name: 'Custom Bot',
+        email: 'custom@example.com',
+      });
+
+      const command = 'git commit -m "Test commit"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Test commit
+
+Co-authored-by: Custom Bot <custom@example.com>"`,
+      );
+    });
+  });
+});
+
+describe('validateToolParams', () => {
+  it('should return null for valid directory', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test',
+    });
+    expect(result).toBeNull();
+  });
+
+  it('should return error for directory outside workspace', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test2',
+    });
+    expect(result).toContain('is not a registered workspace directory');
+  });
+});
+
+describe('validateToolParams', () => {
+  it('should return null for valid directory', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test',
+    });
+    expect(result).toBeNull();
+  });
+
+  it('should return error for directory outside workspace', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test2',
+    });
+    expect(result).toContain('is not a registered workspace directory');
   });
 });

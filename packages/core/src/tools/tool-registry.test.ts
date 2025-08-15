@@ -30,6 +30,9 @@ import {
   Schema,
 } from '@google/genai';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+
+vi.mock('node:fs');
 
 // Use vi.hoisted to define the mock function so it can be used in the vi.mock factory
 const mockDiscoverMcpTools = vi.hoisted(() => vi.fn());
@@ -144,6 +147,10 @@ describe('ToolRegistry', () => {
   let mockConfigGetToolDiscoveryCommand: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.statSync).mockReturnValue({
+      isDirectory: () => true,
+    } as fs.Stats);
     config = new Config(baseConfigParams);
     toolRegistry = new ToolRegistry(config);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -163,6 +170,10 @@ describe('ToolRegistry', () => {
     );
     vi.spyOn(config, 'getMcpServers');
     vi.spyOn(config, 'getMcpServerCommand');
+    vi.spyOn(config, 'getPromptRegistry').mockReturnValue({
+      clear: vi.fn(),
+      removePromptsByServer: vi.fn(),
+    } as any);
     mockDiscoverMcpTools.mockReset().mockResolvedValue(undefined);
   });
 
@@ -344,7 +355,7 @@ describe('ToolRegistry', () => {
         mcpServerConfigVal,
         undefined,
         toolRegistry,
-        undefined,
+        config.getPromptRegistry(),
         false,
       );
     });
@@ -367,7 +378,7 @@ describe('ToolRegistry', () => {
         mcpServerConfigVal,
         undefined,
         toolRegistry,
-        undefined,
+        config.getPromptRegistry(),
         false,
       );
     });

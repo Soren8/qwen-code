@@ -137,7 +137,7 @@ export class ToolCallEvent {
       ? getDecisionFromOutcome(call.outcome)
       : undefined;
     this.error = call.response.error?.message;
-    this.error_type = call.response.error?.name;
+    this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
   }
 }
@@ -161,6 +161,7 @@ export class ApiRequestEvent {
 export class ApiErrorEvent {
   'event.name': 'api_error';
   'event.timestamp': string; // ISO 8601
+  response_id?: string;
   model: string;
   error: string;
   error_type?: string;
@@ -170,6 +171,7 @@ export class ApiErrorEvent {
   auth_type?: string;
 
   constructor(
+    response_id: string | undefined,
     model: string,
     error: string,
     duration_ms: number,
@@ -180,6 +182,7 @@ export class ApiErrorEvent {
   ) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
+    this.response_id = response_id;
     this.model = model;
     this.error = error;
     this.error_type = error_type;
@@ -193,6 +196,7 @@ export class ApiErrorEvent {
 export class ApiResponseEvent {
   'event.name': 'api_response';
   'event.timestamp': string; // ISO 8601
+  response_id: string;
   model: string;
   status_code?: number | string;
   duration_ms: number;
@@ -208,6 +212,7 @@ export class ApiResponseEvent {
   auth_type?: string;
 
   constructor(
+    response_id: string,
     model: string,
     duration_ms: number,
     prompt_id: string,
@@ -218,6 +223,7 @@ export class ApiResponseEvent {
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
+    this.response_id = response_id;
     this.model = model;
     this.duration_ms = duration_ms;
     this.status_code = 200;
@@ -266,15 +272,62 @@ export class LoopDetectedEvent {
   }
 }
 
-export class FlashDecidedToContinueEvent {
-  'event.name': 'flash_decided_to_continue';
+export class NextSpeakerCheckEvent {
+  'event.name': 'next_speaker_check';
   'event.timestamp': string; // ISO 8601
   prompt_id: string;
+  finish_reason: string;
+  result: string;
 
-  constructor(prompt_id: string) {
-    this['event.name'] = 'flash_decided_to_continue';
+  constructor(prompt_id: string, finish_reason: string, result: string) {
+    this['event.name'] = 'next_speaker_check';
     this['event.timestamp'] = new Date().toISOString();
     this.prompt_id = prompt_id;
+    this.finish_reason = finish_reason;
+    this.result = result;
+  }
+}
+
+export class SlashCommandEvent {
+  'event.name': 'slash_command';
+  'event.timestamp': string; // ISO 8106
+  command: string;
+  subcommand?: string;
+
+  constructor(command: string, subcommand?: string) {
+    this['event.name'] = 'slash_command';
+    this['event.timestamp'] = new Date().toISOString();
+    this.command = command;
+    this.subcommand = subcommand;
+  }
+}
+
+export class MalformedJsonResponseEvent {
+  'event.name': 'malformed_json_response';
+  'event.timestamp': string; // ISO 8601
+  model: string;
+
+  constructor(model: string) {
+    this['event.name'] = 'malformed_json_response';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = model;
+  }
+}
+
+export enum IdeConnectionType {
+  START = 'start',
+  SESSION = 'session',
+}
+
+export class IdeConnectionEvent {
+  'event.name': 'ide_connection';
+  'event.timestamp': string; // ISO 8601
+  connection_type: IdeConnectionType;
+
+  constructor(connection_type: IdeConnectionType) {
+    this['event.name'] = 'ide_connection';
+    this['event.timestamp'] = new Date().toISOString();
+    this.connection_type = connection_type;
   }
 }
 
@@ -288,4 +341,7 @@ export type TelemetryEvent =
   | ApiResponseEvent
   | FlashFallbackEvent
   | LoopDetectedEvent
-  | FlashDecidedToContinueEvent;
+  | NextSpeakerCheckEvent
+  | SlashCommandEvent
+  | MalformedJsonResponseEvent
+  | IdeConnectionEvent;

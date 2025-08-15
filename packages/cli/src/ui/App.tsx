@@ -22,6 +22,7 @@ import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './hooks/useAuthCommand.js';
+import { useQwenAuth } from './hooks/useQwenAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
@@ -35,10 +36,10 @@ import { Footer } from './components/Footer.js';
 import { ThemeDialog } from './components/ThemeDialog.js';
 import { AuthDialog } from './components/AuthDialog.js';
 import { AuthInProgress } from './components/AuthInProgress.js';
+import { QwenOAuthProgress } from './components/QwenOAuthProgress.js';
 import { EditorSettingsDialog } from './components/EditorSettingsDialog.js';
 import { ShellConfirmationDialog } from './components/ShellConfirmationDialog.js';
 import { Colors } from './colors.js';
-import { Help } from './components/Help.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import { LoadedSettings } from '../config/settings.js';
 import { Tips } from './components/Tips.js';
@@ -60,7 +61,7 @@ import {
   FlashFallbackEvent,
   logFlashFallback,
   AuthType,
-  type OpenFiles,
+  type IdeContext,
   ideContext,
 } from '@qwen-code/qwen-code-core';
 import { validateAuthMethod } from '../config/auth.js';
@@ -83,11 +84,12 @@ import {
   isGenericQuotaExceededError,
   UserTierId,
 } from '@qwen-code/qwen-code-core';
-import { checkForUpdates } from './utils/updateCheck.js';
+import { UpdateObject } from './utils/updateCheck.js';
 import ansiEscapes from 'ansi-escapes';
 import { OverflowProvider } from './contexts/OverflowContext.js';
 import { ShowMoreLines } from './components/ShowMoreLines.js';
 import { PrivacyNotice } from './privacy/PrivacyNotice.js';
+import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
@@ -110,15 +112,16 @@ export const AppWrapper = (props: AppProps) => (
 const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const isFocused = useFocus();
   useBracketedPaste();
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateObject | null>(null);
   const { stdout } = useStdout();
   const nightly = version.includes('nightly');
+  const { history, addItem, clearItems, loadHistory } = useHistory();
 
   useEffect(() => {
-    checkForUpdates().then(setUpdateMessage);
-  }, []);
+    const cleanup = setUpdateHandler(addItem, setUpdateInfo);
+    return cleanup;
+  }, [addItem]);
 
-  const { history, addItem, clearItems, loadHistory } = useHistory();
   const {
     consoleMessages,
     handleNewMessage,
@@ -144,7 +147,6 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
 
   const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(0);
   const [debugMessage, setDebugMessage] = useState<string>('');
-  const [showHelp, setShowHelp] = useState<boolean>(false);
   const [themeError, setThemeError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
@@ -169,13 +171,15 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [userTier, setUserTier] = useState<UserTierId | undefined>(undefined);
-  const [openFiles, setOpenFiles] = useState<OpenFiles | undefined>();
+  const [ideContextState, setIdeContextState] = useState<
+    IdeContext | undefined
+  >();
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
 
   useEffect(() => {
-    const unsubscribe = ideContext.subscribeToOpenFiles(setOpenFiles);
+    const unsubscribe = ideContext.subscribeToIdeContext(setIdeContextState);
     // Set the initial value
-    setOpenFiles(ideContext.getOpenFilesContext());
+    setIdeContextState(ideContext.getIdeContext());
     return unsubscribe;
   }, []);
 
@@ -229,15 +233,29 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     cancelAuthentication,
   } = useAuthCommand(settings, setAuthError, config);
 
+  const {
+    isQwenAuthenticating,
+    deviceAuth,
+    isQwenAuth,
+    cancelQwenAuth,
+    authStatus,
+    authMessage,
+  } = useQwenAuth(settings, isAuthenticating);
+
   useEffect(() => {
-    if (settings.merged.selectedAuthType) {
+    if (settings.merged.selectedAuthType && !settings.merged.useExternalAuth) {
       const error = validateAuthMethod(settings.merged.selectedAuthType);
       if (error) {
         setAuthError(error);
         openAuthDialog();
       }
     }
-  }, [settings.merged.selectedAuthType, openAuthDialog, setAuthError]);
+  }, [
+    settings.merged.selectedAuthType,
+    settings.merged.useExternalAuth,
+    openAuthDialog,
+    setAuthError,
+  ]);
 
   // Sync user tier from config when authentication changes
   useEffect(() => {
@@ -246,6 +264,27 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       setUserTier(config.getGeminiClient()?.getUserTier());
     }
   }, [config, isAuthenticating]);
+
+  // Handle Qwen OAuth timeout
+  useEffect(() => {
+    if (isQwenAuth && authStatus === 'timeout') {
+      setAuthError(
+        authMessage ||
+          'Qwen OAuth authentication timed out. Please try again or select a different authentication method.',
+      );
+      cancelQwenAuth();
+      cancelAuthentication();
+      openAuthDialog();
+    }
+  }, [
+    isQwenAuth,
+    authStatus,
+    authMessage,
+    cancelQwenAuth,
+    cancelAuthentication,
+    openAuthDialog,
+    setAuthError,
+  ]);
 
   const {
     isEditorDialogOpen,
@@ -269,10 +308,14 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     try {
       const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
         process.cwd(),
+        settings.merged.loadMemoryFromIncludeDirectories
+          ? config.getWorkspaceContext().getDirectories()
+          : [],
         config.getDebugMode(),
         config.getFileService(),
         settings.merged,
         config.getExtensionContextFilePaths(),
+        settings.merged.memoryImportFormat || 'tree', // Use setting or default to 'tree'
         config.getFileFilteringOptions(),
       );
 
@@ -396,6 +439,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
 
       // Switch model for future use but return false to stop current retry
       config.setModel(fallbackModel);
+      config.setFallbackMode(true);
       logFlashFallback(
         config,
         new FlashFallbackEvent(config.getContentGeneratorConfig().authType!),
@@ -462,7 +506,6 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     clearItems,
     loadHistory,
     refreshStatic,
-    setShowHelp,
     setDebugMessage,
     openThemeDialog,
     openAuthDialog,
@@ -472,6 +515,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     openPrivacyNotice,
     toggleVimEnabled,
     setIsProcessing,
+    setGeminiMdFileCount,
   );
 
   const {
@@ -484,7 +528,6 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     config.getGeminiClient(),
     history,
     addItem,
-    setShowHelp,
     config,
     setDebugMessage,
     handleSlashCommand,
@@ -494,6 +537,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     performMemoryRefresh,
     modelSwitchedFromQuotaError,
     setModelSwitchedFromQuotaError,
+    refreshStatic,
   );
 
   // Input handling
@@ -568,7 +612,12 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       if (Object.keys(mcpServers || {}).length > 0) {
         handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
       }
-    } else if (key.ctrl && input === 'e' && ideContext) {
+    } else if (
+      key.ctrl &&
+      input === 'e' &&
+      config.getIdeMode() &&
+      ideContextState
+    ) {
       setShowIDEContextDetail((prev) => !prev);
     } else if (key.ctrl && (input === 'c' || input === 'C')) {
       handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
@@ -587,7 +636,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     if (config) {
       setGeminiMdFileCount(config.getGeminiMdFileCount());
     }
-  }, [config]);
+  }, [config, config.getGeminiMdFileCount]);
 
   const logger = useLogger();
   const [userMessages, setUserMessages] = useState<string[]>([]);
@@ -754,9 +803,6 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   return (
     <StreamingContext.Provider value={streamingState}>
       <Box flexDirection="column" width="90%">
-        {/* Move UpdateNotification outside Static so it can re-render when updateMessage changes */}
-        {updateMessage && <UpdateNotification message={updateMessage} />}
-
         {/*
          * The Static component is an Ink intrinsic in which there can only be 1 per application.
          * Because of this restriction we're hacking it slightly by having a 'header' item here to
@@ -789,6 +835,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                 item={h}
                 isPending={false}
                 config={config}
+                commands={slashCommands}
               />
             )),
           ]}
@@ -816,9 +863,9 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
           </Box>
         </OverflowProvider>
 
-        {showHelp && <Help commands={slashCommands} />}
-
         <Box flexDirection="column" ref={mainControlsRef}>
+          {/* Move UpdateNotification to render update notification above input area */}
+          {updateInfo && <UpdateNotification message={updateInfo.message} />}
           {startupWarnings.length > 0 && (
             <Box
               borderStyle="round"
@@ -858,13 +905,35 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
             </Box>
           ) : isAuthenticating ? (
             <>
-              <AuthInProgress
-                onTimeout={() => {
-                  setAuthError('Authentication timed out. Please try again.');
-                  cancelAuthentication();
-                  openAuthDialog();
-                }}
-              />
+              {isQwenAuth && isQwenAuthenticating ? (
+                <QwenOAuthProgress
+                  deviceAuth={deviceAuth || undefined}
+                  authStatus={authStatus}
+                  authMessage={authMessage}
+                  onTimeout={() => {
+                    setAuthError(
+                      'Qwen OAuth authentication timed out. Please try again.',
+                    );
+                    cancelQwenAuth();
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                  onCancel={() => {
+                    setAuthError('Qwen OAuth authentication cancelled.');
+                    cancelQwenAuth();
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                />
+              ) : (
+                <AuthInProgress
+                  onTimeout={() => {
+                    setAuthError('Authentication timed out. Please try again.');
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                />
+              )}
               {showErrorDetails && (
                 <OverflowProvider>
                   <Box flexDirection="column">
@@ -943,7 +1012,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                     </Text>
                   ) : (
                     <ContextSummaryDisplay
-                      openFiles={openFiles}
+                      ideContext={ideContextState}
                       geminiMdFileCount={geminiMdFileCount}
                       contextFileNames={contextFileNames}
                       mcpServers={config.getMcpServers()}
@@ -963,7 +1032,12 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                 </Box>
               </Box>
               {showIDEContextDetail && (
-                <IDEContextDetailDisplay openFiles={openFiles} />
+                <IDEContextDetailDisplay
+                  ideContext={ideContextState}
+                  detectedIdeDisplay={config
+                    .getIdeClient()
+                    .getDetectedIdeDisplayName()}
+                />
               )}
               {showErrorDetails && (
                 <OverflowProvider>

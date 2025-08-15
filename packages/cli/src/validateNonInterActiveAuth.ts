@@ -21,11 +21,15 @@ function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env.OPENAI_API_KEY) {
     return AuthType.USE_OPENAI;
   }
+  if (process.env.QWEN_OAUTH_TOKEN) {
+    return AuthType.QWEN_OAUTH;
+  }
   return undefined;
 }
 
 export async function validateNonInteractiveAuth(
   configuredAuthType: AuthType | undefined,
+  useExternalAuth: boolean | undefined,
   nonInteractiveConfig: Config,
 ) {
   const effectiveAuthType = configuredAuthType || getAuthTypeFromEnv();
@@ -37,10 +41,12 @@ export async function validateNonInteractiveAuth(
     process.exit(1);
   }
 
-  const err = validateAuthMethod(effectiveAuthType);
-  if (err != null) {
-    console.error(err);
-    process.exit(1);
+  if (!useExternalAuth) {
+    const err = validateAuthMethod(effectiveAuthType);
+    if (err != null) {
+      console.error(err);
+      process.exit(1);
+    }
   }
 
   await nonInteractiveConfig.refreshAuth(effectiveAuthType);

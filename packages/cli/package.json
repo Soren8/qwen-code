@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -25,12 +25,12 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.4"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.6"
   },
   "dependencies": {
-    "@qwen-code/qwen-code-core": "file:../core",
     "@google/genai": "1.9.0",
     "@iarna/toml": "^2.2.5",
+    "@qwen-code/qwen-code-core": "file:../core",
     "@types/update-notifier": "^6.0.8",
     "command-exists": "^1.2.9",
     "diff": "^7.0.0",
@@ -46,12 +46,14 @@
     "lowlight": "^3.3.0",
     "mime-types": "^3.0.1",
     "open": "^10.1.2",
+    "qrcode-terminal": "^0.12.0",
     "react": "^19.1.0",
     "read-package-up": "^11.0.0",
     "shell-quote": "^1.8.3",
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
+    "tiktoken": "^1.0.21",
     "update-notifier": "^7.3.1",
     "yargs": "^17.7.2",
     "zod": "^3.23.8"
@@ -73,7 +75,8 @@
     "pretty-format": "^30.0.2",
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
-    "vitest": "^3.1.1"
+    "vitest": "^3.1.1",
+    "@qwen-code/qwen-code-test-utils": "file:../test-utils"
   },
   "engines": {
     "node": ">=20"
