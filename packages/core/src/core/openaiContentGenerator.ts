@@ -138,6 +138,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
     const isOpenRouter = baseURL.includes('openrouter.ai');
     const defaultHeaders = {
       'User-Agent': userAgent,
+      'X-DashScope-CacheControl': 'enable',
       ...(isOpenRouter
         ? {
             'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
