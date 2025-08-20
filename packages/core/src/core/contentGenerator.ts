@@ -81,8 +81,11 @@ export function createContentGeneratorConfig(
   const googleCloudLocation = process.env.GOOGLE_CLOUD_LOCATION || undefined;
   const openaiApiKey = process.env.OPENAI_API_KEY;
 
-  // Use runtime model from config if available; otherwise, fall back to parameter or default
-  const effectiveModel = config.getModel() || DEFAULT_GEMINI_MODEL;
+  // 1) honor OPENAI_MODEL if set; 2) runtime model from config if available; 3) fall back to Gemini default
+  const effectiveModel =
+    process.env.OPENAI_MODEL ??
+    config.getModel() ??
+    DEFAULT_GEMINI_MODEL;
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     model: effectiveModel,
@@ -126,9 +129,7 @@ export function createContentGeneratorConfig(
 
   if (authType === AuthType.USE_OPENAI && openaiApiKey) {
     contentGeneratorConfig.apiKey = openaiApiKey;
-    contentGeneratorConfig.model =
-      process.env.OPENAI_MODEL || DEFAULT_GEMINI_MODEL;
-
+    // model already set via effectiveModel
     return contentGeneratorConfig;
   }
 
