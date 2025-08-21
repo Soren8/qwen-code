@@ -81,6 +81,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [cursorPosition, setCursorPosition] = useState<[number, number]>([
     0, 0,
   ]);
+  // Track whether we're in multiline-entry mode triggered by a leading '{' on line 0
+  const [multilineActive, setMultilineActive] = useState(false);
+
   const shellHistory = useShellHistory(config.getProjectRoot());
   const historyData = shellHistory.history;
 
@@ -137,6 +140,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
+      // Exiting multiline mode when submitting
+      setMultilineActive(false);
       onSubmit(submittedValue);
       resetCompletionState();
       resetReverseSearchCompletionState();
@@ -148,6 +153,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellModeActive,
       shellHistory,
       resetReverseSearchCompletionState,
+      setMultilineActive,
     ],
   );
 
@@ -257,6 +263,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ) {
         setShellModeActive(!shellModeActive);
         buffer.setText(''); // Clear the '!' from input
+        // Exiting multiline mode when toggling shell mode
+        setMultilineActive(false);
         return;
       }
 
@@ -301,6 +309,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         } else {
           // clear input and immediately reset state
           buffer.setText('');
+          // Exiting multiline mode when input is cleared
+          setMultilineActive(false);
           resetCompletionState();
           resetEscapeState();
         }
@@ -366,7 +376,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // If the command is a perfect match, pressing enter should execute it.
-      if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+      // Don't auto-submit on perfect match while in multiline mode.
+      if (!multilineActive && completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
         handleSubmitAndClear(buffer.text);
         return;
       }
@@ -441,12 +452,37 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (buffer.text.trim()) {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row];
+          const trimmedLine = line.trim();
           const charBefore = col > 0 ? cpSlice(line, col - 1, col) : '';
-          if (charBefore === '\\') {
-            buffer.backspace();
-            buffer.newline();
+    
+          if (!multilineActive) {
+            // Not in multiline mode
+            if (row === 0 && trimmedLine === '{') {
+              // Start multiline mode
+              setMultilineActive(true);
+              buffer.newline();
+            } else if (charBefore === '\\') {
+              // Preserve escape-newline behavior
+              buffer.backspace();
+              buffer.newline();
+            } else {
+              // Regular submit
+              handleSubmitAndClear(buffer.text);
+            }
           } else {
-            handleSubmitAndClear(buffer.text);
+            // In multiline mode
+            if (trimmedLine === '}') {
+              // End multiline mode and submit
+              handleSubmitAndClear(buffer.text);
+              setMultilineActive(false);
+            } else if (charBefore === '\\') {
+              // Preserve escape-newline behavior inside multiline
+              buffer.backspace();
+              buffer.newline();
+            } else {
+              // Insert a newline
+              buffer.newline();
+            }
           }
         }
         return;
@@ -472,6 +508,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
         if (buffer.text.length > 0) {
           buffer.setText('');
+          // Exiting multiline mode when input is cleared
+          setMultilineActive(false);
           resetCompletionState();
         }
         return;
@@ -522,6 +560,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchActive,
       textBeforeReverseSearch,
       cursorPosition,
+      multilineActive,
+      setMultilineActive,
     ],
   );
 
