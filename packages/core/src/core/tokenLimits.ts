@@ -26,6 +26,10 @@ export function tokenLimit(model: Model): TokenCount {
       return 1_048_576;
     case 'gemini-2.0-flash-preview-image-generation':
       return 32_000;
+    case 'qwen-3-coder-480b':
+      return 131_000;
+    case 'gpt-5-mini':
+      return 400_000;
     default:
       return DEFAULT_TOKEN_LIMIT;
   }
