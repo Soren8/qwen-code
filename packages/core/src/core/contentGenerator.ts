@@ -18,6 +18,7 @@ import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { Config } from '../config/config.js';
 import { getEffectiveModel } from './modelCheck.js';
 import { UserTierId } from '../code_assist/types.js';
+import { LoggingContentGenerator } from './loggingContentGenerator.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -52,6 +53,7 @@ export enum AuthType {
 export type ContentGeneratorConfig = {
   model: string;
   apiKey?: string;
+  baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
   enableOpenAILogging?: boolean;
@@ -75,11 +77,16 @@ export function createContentGeneratorConfig(
   config: Config,
   authType: AuthType | undefined,
 ): ContentGeneratorConfig {
+  // google auth
   const geminiApiKey = process.env.GEMINI_API_KEY || undefined;
   const googleApiKey = process.env.GOOGLE_API_KEY || undefined;
   const googleCloudProject = process.env.GOOGLE_CLOUD_PROJECT || undefined;
   const googleCloudLocation = process.env.GOOGLE_CLOUD_LOCATION || undefined;
+
+  // openai auth
   const openaiApiKey = process.env.OPENAI_API_KEY;
+  const openaiBaseUrl = process.env.OPENAI_BASE_URL || undefined;
+  const openaiModel = process.env.OPENAI_MODEL || undefined;
 
   // 1) honor OPENAI_MODEL if set; 2) runtime model from config if available; 3) fall back to Gemini default
   const effectiveModel =
@@ -94,7 +101,7 @@ export function createContentGeneratorConfig(
     enableOpenAILogging: config.getEnableOpenAILogging(),
     timeout: config.getContentGeneratorTimeout(),
     maxRetries: config.getContentGeneratorMaxRetries(),
-    samplingParams: config.getSamplingParams(),
+    samplingParams: config.getContentGeneratorSamplingParams(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -129,7 +136,8 @@ export function createContentGeneratorConfig(
 
   if (authType === AuthType.USE_OPENAI && openaiApiKey) {
     contentGeneratorConfig.apiKey = openaiApiKey;
-    // model already set via effectiveModel
+    contentGeneratorConfig.baseUrl = openaiBaseUrl;
+    contentGeneratorConfig.model = openaiModel || DEFAULT_QWEN_MODEL;
     return contentGeneratorConfig;
   }
 
@@ -162,11 +170,14 @@ export async function createContentGenerator(
     config.authType === AuthType.LOGIN_WITH_GOOGLE ||
     config.authType === AuthType.CLOUD_SHELL
   ) {
-    return createCodeAssistContentGenerator(
-      httpOptions,
-      config.authType,
+    return new LoggingContentGenerator(
+      await createCodeAssistContentGenerator(
+        httpOptions,
+        config.authType,
+        gcConfig,
+        sessionId,
+      ),
       gcConfig,
-      sessionId,
     );
   }
 
@@ -179,8 +190,7 @@ export async function createContentGenerator(
       vertexai: config.vertexai,
       httpOptions,
     });
-
-    return googleGenAI.models;
+    return new LoggingContentGenerator(googleGenAI.models, gcConfig);
   }
 
   if (config.authType === AuthType.USE_OPENAI) {
@@ -194,7 +204,7 @@ export async function createContentGenerator(
     );
 
     // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
-    return new OpenAIContentGenerator(config.apiKey, config.model, gcConfig);
+    return new OpenAIContentGenerator(config, gcConfig);
   }
 
   if (config.authType === AuthType.QWEN_OAUTH) {
@@ -215,7 +225,7 @@ export async function createContentGenerator(
       const qwenClient = await getQwenOauthClient(gcConfig);
 
       // Create the content generator with dynamic token management
-      return new QwenContentGenerator(qwenClient, config.model, gcConfig);
+      return new QwenContentGenerator(qwenClient, config, gcConfig);
     } catch (error) {
       throw new Error(
         `Failed to initialize Qwen: ${error instanceof Error ? error.message : String(error)}`,
